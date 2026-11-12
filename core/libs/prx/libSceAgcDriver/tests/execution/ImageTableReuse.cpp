@@ -232,6 +232,18 @@ void Expect(const AgcDriver::Graphics::ImageTableReuseCounts& before, std::uint6
     Require(step.reused == reused && step.resolved == resolved, "image table reuse: " + what + ": " + std::to_string(step.reused) + " reused and " + std::to_string(step.resolved) + " resolved tables, expected " + std::to_string(reused) + " and " + std::to_string(resolved));
 }
 
+void ExpectPatch(const AgcDriver::Graphics::ImageTableReuseCounts& before, std::uint64_t patched, std::uint64_t carried, std::uint64_t built, const std::string& what) {
+    const auto now = AgcDriver::Graphics::ImageTableReuses();
+    const auto patchedNow = now.patched - before.patched;
+    const auto carriedNow = now.elementsCarried - before.elementsCarried;
+    const auto builtNow = now.elementsBuilt - before.elementsBuilt;
+    if (std::getenv("APS5_NO_TABLE_PATCH") != nullptr) {
+        Require(patchedNow == 0u && carriedNow == 0u, "image table reuse: " + what + ": tables were patched with patching turned off");
+        return;
+    }
+    Require(patchedNow == patched && carriedNow == carried && builtNow == built, "image table reuse: " + what + ": " + std::to_string(patchedNow) + " patched tables carrying " + std::to_string(carriedNow) + " elements and building " + std::to_string(builtNow) + ", expected " + std::to_string(patched) + ", " + std::to_string(carried) + " and " + std::to_string(built));
+}
+
 void RunImageStore(AgcDriver::VulkanDevice& device, const GuestBlock& block) {
     for (std::uint32_t texture = 0; texture < Records; ++texture) {
         Fill(block, texture, 0.125f);
@@ -391,6 +403,7 @@ void RunTests(AgcDriver::VulkanDevice& device, const GuestBlock& block, const Gu
     Require(Dispatch(device, result, 9) == Row(block.Texels(9)), "image table reuse: the table resolved after the texture cache was cleared sampled the wrong entry");
     Expect(before, 1, 1, "a kept table whose textures the texture cache dropped");
     ExpectWrites(before, 1, 1, "a kept table whose textures the texture cache dropped");
+    ExpectPatch(before, 0, 0, Records, "a kept table whose textures the texture cache dropped");
 
     before = AgcDriver::Graphics::ImageTableReuses();
     std::vector<float> stored(Width * Height);
@@ -399,6 +412,7 @@ void RunTests(AgcDriver::VulkanDevice& device, const GuestBlock& block, const Gu
     Require(Dispatch(device, result, 11) == Row(stored.data()), "image table reuse: an entry the driver stored over in the epoch kept its old texels");
     Require(Dispatch(device, result, 11) == Row(stored.data()), "image table reuse: the table resolved after a driver store sampled the wrong entry");
     Expect(before, 1, 1, "a driver store over an entry");
+    ExpectPatch(before, 0, 0, Records, "a driver store over an entry of a table whose words did not change");
 
     before = AgcDriver::Graphics::ImageTableReuses();
     Fill(block, 17, 0.75f);
@@ -418,6 +432,20 @@ void RunTests(AgcDriver::VulkanDevice& device, const GuestBlock& block, const Gu
     Require(Dispatch(device, result, 21) == Row(block.Texels(21)), "image table reuse: the original table sampled the wrong entry when reused");
     Expect(before, 2, 2, "two tables that differ in one record");
     ExpectWrites(before, 0, 4, "two tables that differ in one record, alternating");
+    ExpectPatch(before, 1, Records - 1, Records + 1, "two tables that differ in one record");
+
+    before = AgcDriver::Graphics::ImageTableReuses();
+    Fill(block, Records + 17, 0.625f);
+    SetRecord(block, 23, Records + 17);
+    AgcDriver::GuestMemory::BumpCollectEpoch();
+    const auto moved2 = Compile(device, block);
+    Require(Dispatch(device, moved2, 23) == Row(block.Texels(Records + 17)), "image table reuse: a second moved record sampled the old texture");
+    AgcDriver::GuestMemory::Write(AddressOf(block.Texels(11)), std::as_bytes(std::span(stored)));
+    Require(Dispatch(device, result, 19) == Row(block.Texels(19)), "image table reuse: a table patched over a written entry sampled the wrong texture");
+    Require(Dispatch(device, result, 11) == Row(stored.data()), "image table reuse: a patched table kept stale texels over a written entry");
+    Require(Dispatch(device, moved2, 23) == Row(block.Texels(Records + 17)), "image table reuse: the table patched back over the written entry sampled the wrong texture");
+    Expect(before, 1, 3, "a table that changed two records while another entry's texels were written");
+    ExpectPatch(before, 2, (Records - 2 - 4096 / TextureBytes) + (Records - 2), Records + 2 + 4096 / TextureBytes + 2, "a table that changed two records while another entry's texels were written");
 
     SetOutput(block.Texels(13));
     const auto writer = Compile(device, block);

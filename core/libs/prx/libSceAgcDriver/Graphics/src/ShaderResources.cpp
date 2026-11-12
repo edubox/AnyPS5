@@ -498,6 +498,9 @@ struct TextureCounters {
     std::atomic<std::uint64_t> tablesReused{0};
     std::atomic<std::uint64_t> tablesReplayed{0};
     std::atomic<std::uint64_t> tablesResolved{0};
+    std::atomic<std::uint64_t> tablesPatched{0};
+    std::atomic<std::uint64_t> elementsCarried{0};
+    std::atomic<std::uint64_t> elementsBuilt{0};
     std::atomic<std::uint64_t> tableWritesKept{0};
     std::atomic<std::uint64_t> tableWritesMade{0};
     std::atomic<std::uint64_t> variantSurfaces{0};
@@ -530,7 +533,7 @@ void reportTextureCounters() {
     auto last = counters.lastReport.load();
     if (nowMs - last < 10000 || !counters.lastReport.compare_exchange_strong(last, nowMs)) return;
     const auto count = [](const std::atomic<std::uint64_t>& value) { return static_cast<unsigned long long>(value.load(std::memory_order_relaxed)); };
-    AgcDriver::ProfilePrint_nid_no_patch("[textures] sampled created: %llu from storage images, %llu cleared on the GPU, %llu snapshots (%llu snapshot reads over recorded writes inside cachedTexture, %llu storage-path fallbacks); stage-A records %llu: %llu fast hits, %llu full lookups; storage images %llu hits, %llu created, %llu own-object refreshes; image tables %llu reused, %llu resolved; dynamic-resolution variants: %llu surfaces, %llu entries substituted, %llu entries rejected; untracked snapshots %llu kept by the write-watch hint, %llu compared\n", count(counters.fromStorage), count(counters.cleared), count(counters.snapshots), count(counters.pendingReads), count(counters.storageFallbacks), count(counters.records), count(counters.fastHits), count(counters.fastMisses), count(counters.storageHits), count(counters.storageCreated), count(counters.ownRefreshes), count(counters.tablesReused), count(counters.tablesResolved), count(counters.variantSurfaces), count(counters.variantSubstituted), count(counters.variantRejected), count(counters.untrackedKept), count(counters.untrackedCompared));
+    AgcDriver::ProfilePrint_nid_no_patch("[textures] sampled created: %llu from storage images, %llu cleared on the GPU, %llu snapshots (%llu snapshot reads over recorded writes inside cachedTexture, %llu storage-path fallbacks); stage-A records %llu: %llu fast hits, %llu full lookups; storage images %llu hits, %llu created, %llu own-object refreshes; image tables %llu reused, %llu resolved (%llu patched, %llu elements carried, %llu elements built); dynamic-resolution variants: %llu surfaces, %llu entries substituted, %llu entries rejected; untracked snapshots %llu kept by the write-watch hint, %llu compared\n", count(counters.fromStorage), count(counters.cleared), count(counters.snapshots), count(counters.pendingReads), count(counters.storageFallbacks), count(counters.records), count(counters.fastHits), count(counters.fastMisses), count(counters.storageHits), count(counters.storageCreated), count(counters.ownRefreshes), count(counters.tablesReused), count(counters.tablesResolved), count(counters.tablesPatched), count(counters.elementsCarried), count(counters.elementsBuilt), count(counters.variantSurfaces), count(counters.variantSubstituted), count(counters.variantRejected), count(counters.untrackedKept), count(counters.untrackedCompared));
 }
 
 // What the sampled-texture lookups on this thread proved their returned objects current against,
@@ -2136,6 +2139,11 @@ bool TableReplay() {
     return !disabled;
 }
 
+bool TablePatchEnabled() {
+    static const bool disabled = std::getenv("APS5_NO_TABLE_PATCH") != nullptr;
+    return !disabled;
+}
+
 struct TableState {
     std::uint64_t epoch = 0;
     std::uint64_t unwatched = 0;
@@ -2200,6 +2208,32 @@ ReusedTable* FindReusedTable(VkDevice device, const ShaderRecompiler::Descriptor
     }
     return nullptr;
 }
+
+ReusedTable* FindNearTable(VkDevice device, const ShaderRecompiler::DescriptorBinding& binding, const TableState& state) {
+    if (state.epoch == 0) return nullptr;
+    auto& tables = ReusedTables();
+    std::erase_if(tables, [&](const ReusedTable& table) { return table.state != state; });
+    ReusedTable* best = nullptr;
+    std::size_t bestMatches = 0;
+    for (auto& table : tables) {
+        if (table.device != device || table.words.size() != binding.guestDescriptor.size() || table.words.size() % 8u != 0 || table.elements.size() != binding.count || table.shapes != binding.imageShapes || table.depthCompare != binding.imageDepthCompare) continue;
+        std::size_t matches = 0;
+        for (std::size_t word = 0; word < table.words.size(); word += 8) {
+            if (std::equal(table.words.begin() + static_cast<std::ptrdiff_t>(word), table.words.begin() + static_cast<std::ptrdiff_t>(word + 8), binding.guestDescriptor.begin() + static_cast<std::ptrdiff_t>(word))) ++matches;
+        }
+        if (matches == binding.count || matches <= bestMatches) continue;
+        bestMatches = matches;
+        best = &table;
+    }
+    return best;
+}
+
+struct CarriedTableElement {
+    std::shared_ptr<Texture> texture;
+    GuestMemory::UnchangedQuery query{};
+    bool rejected = false;
+    bool carry = false;
+};
 
 bool TableCurrent(ReusedTable& table) {
     const auto serial = StorageTexture::PendingSerial();
@@ -6343,6 +6377,59 @@ void ShaderResources::resolveImageTables() {
         }
         std::unordered_map<std::uint32_t, GuestTextureResource> representativeSources;
         std::vector<std::uint32_t> substitutes;
+        ReusedTable* donor = !TablePatchEnabled() || storageTable || item == nullptr || !representatives.empty() ? nullptr : FindNearTable(context.device, binding, state);
+        if (donor != nullptr && AnyPendingCpuWrites(context)) {
+            bool landed = false;
+            for (const auto& entry : donor->elements) {
+                if (!entry.rejected && CompletePendingCpuWrites(context, entry.resource.baseAddress, static_cast<std::size_t>(entry.guestBytes))) landed = true;
+            }
+            if (landed && CurrentTableState() != state) donor = nullptr;
+        }
+        if (donor != nullptr) {
+            const auto serial = StorageTexture::PendingSerial();
+            if (serial != donor->pendingSerial && (StorageTexture::AnyPendingOverlaps(donor->ranges) || StorageTexture::PendingSerial() != serial)) donor = nullptr;
+        }
+        std::vector<CarriedTableElement> carried;
+        bool donorReplay = false;
+        if (donor != nullptr) {
+            carried.resize(binding.count);
+            donorReplay = TableReplay() && donor->replayable && donor->imageSamplers == binding.imageSamplers && donor->samplers == samplerKey;
+            std::vector<GuestMemory::UnchangedQuery> queries;
+            std::vector<std::uint32_t> candidates;
+            std::size_t query = 0;
+            for (std::uint32_t element = 0; element < binding.count; ++element) {
+                const auto& entry = donor->elements[element];
+                const auto words = std::span<const std::uint32_t>(binding.guestDescriptor).subspan(static_cast<std::size_t>(element) * 8u, 8u);
+                const auto old = std::span<const std::uint32_t>(donor->words).subspan(static_cast<std::size_t>(element) * 8u, 8u);
+                const bool same = std::equal(words.begin(), words.end(), old.begin());
+                if (entry.rejected) {
+                    if (same) {
+                        carried[element].rejected = true;
+                        carried[element].carry = true;
+                    }
+                    continue;
+                }
+                if (entry.live) continue;
+                const auto& elementQuery = donor->queries[query++];
+                if (!same) continue;
+                carried[element].query = elementQuery;
+                queries.push_back(elementQuery);
+                candidates.push_back(element);
+            }
+            const bool allUnchanged = GuestMemory::UnchangedSinceAll(queries);
+            auto& cache = Textures();
+            std::lock_guard lock(cache.mutex);
+            for (const auto element : candidates) {
+                const auto& entry = donor->elements[element];
+                const auto& elementQuery = carried[element].query;
+                if (!allUnchanged && !GuestMemory::UnchangedSince(elementQuery.address, elementQuery.bytes, elementQuery.generation)) continue;
+                const auto it = findTexture(cache, entry.key);
+                if (it == cache.entries.end() || it->texture != entry.texture.lock()) continue;
+                carried[element].texture = it->texture;
+                carried[element].carry = true;
+                touchTexture(cache, it);
+            }
+        }
         for (std::uint32_t element = 0; element < binding.count; ++element) {
             const auto words = std::span<const std::uint32_t>(binding.guestDescriptor).subspan(static_cast<std::size_t>(element) * 8u, 8u);
             const auto absolute = static_cast<std::uint64_t>(table.elementBase) + element;
@@ -6356,6 +6443,26 @@ void ShaderResources::resolveImageTables() {
                 substitutes.push_back(element);
                 continue;
             }
+            if (!carried.empty() && carried[element].carry) {
+                const auto& entry = donor->elements[element];
+                fresh.elements.push_back(entry);
+                if (carried[element].rejected) {
+                    table.map[faults + element] = rejectTableElement(table, words, entry.message);
+                } else {
+                    fresh.queries.push_back(carried[element].query);
+                    fresh.ranges.emplace_back(entry.resource.baseAddress, entry.resource.baseAddress + entry.guestBytes);
+                    if (donorReplay) {
+                        fresh.bound[element] = donor->bound[element];
+                        if (!donor->bound[element].empty()) table.map[faults + element] = rejectTableElement(table, words, donor->bound[element]);
+                        else place(element, std::move(carried[element].texture), entry.resource, entry.guestBytes, entry.firstLayer);
+                    } else {
+                        fresh.bound[element] = bind(element, words, std::move(carried[element].texture), entry.resource, entry.guestBytes, entry.firstLayer);
+                    }
+                }
+                counters.elementsCarried.fetch_add(1, std::memory_order_relaxed);
+                continue;
+            }
+            counters.elementsBuilt.fetch_add(1, std::memory_order_relaxed);
             DecodedEntry decoded;
             try {
                 decoded = decodeEntry(element, words);
@@ -6444,6 +6551,7 @@ void ShaderResources::resolveImageTables() {
             item->imageAllocations[static_cast<std::size_t>(table.elementBase) + element] = index;
             counters.variantSubstituted.fetch_add(1, std::memory_order_relaxed);
         }
+        if (std::any_of(carried.begin(), carried.end(), [](const CarriedTableElement& element) { return element.carry; })) counters.tablesPatched.fetch_add(1, std::memory_order_relaxed);
         counters.tablesResolved.fetch_add(1, std::memory_order_relaxed);
         const bool anyKept = std::any_of(fresh.elements.begin(), fresh.elements.end(), [](const ReusedTableElement& element) { return !element.live; });
         if (reusable && anyKept && CurrentTableState() == state) {
@@ -6476,7 +6584,7 @@ std::uint64_t SampledTexturesCleared() {
 
 ImageTableReuseCounts ImageTableReuses() {
     const auto& counters = TextureCounts();
-    return {counters.tablesReused.load(std::memory_order_relaxed) + counters.tablesReplayed.load(std::memory_order_relaxed), counters.tablesResolved.load(std::memory_order_relaxed), counters.tablesReplayed.load(std::memory_order_relaxed), counters.tableWritesKept.load(std::memory_order_relaxed), counters.tableWritesMade.load(std::memory_order_relaxed), counters.variantSurfaces.load(std::memory_order_relaxed), counters.variantSubstituted.load(std::memory_order_relaxed), counters.variantRejected.load(std::memory_order_relaxed)};
+    return {counters.tablesReused.load(std::memory_order_relaxed) + counters.tablesReplayed.load(std::memory_order_relaxed), counters.tablesResolved.load(std::memory_order_relaxed), counters.tablesReplayed.load(std::memory_order_relaxed), counters.tableWritesKept.load(std::memory_order_relaxed), counters.tableWritesMade.load(std::memory_order_relaxed), counters.variantSurfaces.load(std::memory_order_relaxed), counters.variantSubstituted.load(std::memory_order_relaxed), counters.variantRejected.load(std::memory_order_relaxed), counters.tablesPatched.load(std::memory_order_relaxed), counters.elementsCarried.load(std::memory_order_relaxed), counters.elementsBuilt.load(std::memory_order_relaxed)};
 }
 
 void ShaderResources::finishImageTables() {

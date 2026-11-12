@@ -171,6 +171,9 @@ struct ImageTableReuseCounts {
     std::uint64_t variantSurfaces = 0;
     std::uint64_t variantSubstituted = 0;
     std::uint64_t variantRejected = 0;
+    std::uint64_t patched = 0;
+    std::uint64_t elementsCarried = 0;
+    std::uint64_t elementsBuilt = 0;
 };
 ImageTableReuseCounts ImageTableReuses();
 std::uint64_t SampledTexturesCleared();
