@@ -1336,6 +1336,91 @@ static void CheckNextafterConsoleBits() {
     }
 }
 
+static void CheckNexttowardfBits() {
+    constexpr struct {
+        std::uint32_t x;
+        long double y;
+        std::uint32_t expected;
+        int expectedErrno;
+    } cases[] = {
+        {0x00000000u, 1.0L, 0x00000001u, 0},
+        {0x80000000u, -1.0L, 0x80000001u, 0},
+        {0x00000000u, -1.0L, 0x80000001u, 0},
+        {0x80000000u, 1.0L, 0x00000001u, 0},
+        {0x3f800000u, 2.0L, 0x3f800001u, 0},
+        {0x3f800000u, 0.5L, 0x3f7fffffu, 0},
+        {0xbf800000u, -2.0L, 0xbf800001u, 0},
+        {0xbf800000u, -0.5L, 0xbf7fffffu, 0},
+        {0x3f800000u, 1.0L, 0x3f800000u, 0},
+        {0x3f800000u, 1.0L + 0x1p-60L, 0x3f800001u, 0},
+        {0x3f800000u, 1.0L - 0x1p-60L, 0x3f7fffffu, 0},
+        {0xbf800000u, -1.0L - 0x1p-60L, 0xbf800001u, 0},
+        {0xbf800000u, -1.0L + 0x1p-60L, 0xbf7fffffu, 0},
+        {0x7f7fffffu, INFINITY, 0x7f800000u, ERANGE},
+        {0xff7fffffu, -INFINITY, 0xff800000u, ERANGE},
+        {0x7f800000u, 0.0L, 0x7f7fffffu, 0},
+        {0xff800000u, 0.0L, 0xff7fffffu, 0},
+        {0x00800000u, 0.0L, 0x007fffffu, ERANGE},
+        {0x80800000u, 0.0L, 0x807fffffu, ERANGE},
+        {0x007fffffu, 1.0L, 0x00800000u, 0},
+        {0x00000001u, 0.0L, 0x00000000u, ERANGE},
+        {0x80000001u, 1.0L, 0x80000000u, ERANGE},
+        {0x7f800001u, 1.0L, 0x7fc00001u, 0},
+    };
+    for (const auto& item : cases) {
+        errno = 1234;
+        Require(std::bit_cast<std::uint32_t>(nexttowardf_nid_postfix(std::bit_cast<float>(item.x), item.y)) == item.expected);
+        Require(errno == (item.expectedErrno != 0 ? item.expectedErrno : 1234));
+    }
+    const float nanValue = std::bit_cast<float>(0x7fc00005u);
+    errno = 1234;
+    Require(std::bit_cast<std::uint32_t>(nexttowardf_nid_postfix(1.f, static_cast<long double>(nanValue))) == 0x7fc00005u);
+    Require(errno == 1234);
+}
+
+static void CheckNexttowardfEnvironment() {
+    const RestoreFloatingPointState saved;
+    constexpr unsigned dazBit = 0x40;
+    const struct {
+        std::uint32_t x;
+        long double y;
+        std::uint32_t normalResult, dazResult;
+        unsigned normalFlags, dazFlags;
+        int normalError, dazError;
+    } cases[] = {
+        {0x00000000u, 1.0L, 0x00000001u, 0x00000000u, 0x32, 0, 97, 97},
+        {0x80000000u, -1.0L, 0x80000001u, 0x00000000u, 0x32, 0, 97, 97},
+        {0x00000001u, 0.0L, 0x00000000u, 0x00000000u, 0x32, 0, ERANGE, 97},
+        {0x80000001u, -0.0L, 0x80000000u, 0x80000000u, 0x32, 0, ERANGE, 97},
+        {0x00800000u, 0.0L, 0x007fffffu, 0x007fffffu, 0x30, 0x30, ERANGE, ERANGE},
+        {0x7f7fffffu, INFINITY, 0x7f800000u, 0x7f800000u, 0x28, 0x28, ERANGE, ERANGE},
+        {0x3f800000u, 2.0L, 0x3f800001u, 0x3f800001u, 0, 0, 97, 97},
+        {0x3f800000u, 1.0L, 0x3f800000u, 0x3f800000u, 0, 0, 97, 97},
+    };
+    for (const bool daz : {false, true}) {
+        for (const auto& item : cases) {
+            Require(std::fesetround(FE_TONEAREST) == 0);
+            Require(std::feclearexcept(FE_ALL_EXCEPT) == 0);
+            errno = 97;
+            _mm_setcsr(0x1f80u | (daz ? dazBit : 0u));
+            const std::uint32_t result = std::bit_cast<std::uint32_t>(nexttowardf_nid_postfix(std::bit_cast<float>(item.x), item.y));
+            const unsigned flags = _mm_getcsr() & 0x3fu;
+            const int exceptions = std::fetestexcept(FE_INVALID | FE_DIVBYZERO | FE_OVERFLOW | FE_UNDERFLOW | FE_INEXACT);
+            const int error = errno;
+            const unsigned expectedFlags = daz ? item.dazFlags : item.normalFlags;
+            Require(result == (daz ? item.dazResult : item.normalResult));
+            Require(flags == expectedFlags);
+            const int expectedExceptions = ((expectedFlags & 0x01u) ? FE_INVALID : 0) |
+                                           ((expectedFlags & 0x04u) ? FE_DIVBYZERO : 0) |
+                                           ((expectedFlags & 0x08u) ? FE_OVERFLOW : 0) |
+                                           ((expectedFlags & 0x10u) ? FE_UNDERFLOW : 0) |
+                                           ((expectedFlags & 0x20u) ? FE_INEXACT : 0);
+            Require(exceptions == expectedExceptions);
+            Require(error == (daz ? item.dazError : item.normalError));
+        }
+    }
+}
+
 static void CheckLog1pReductionRounding() {
     const RestoreFloatingPointState saved;
     const unsigned savedCsr = _mm_getcsr();
@@ -4174,6 +4259,8 @@ int main() {
     CheckExpm1ConsoleBits();
     CheckLog1pConsoleBits();
     CheckNextafterConsoleBits();
+    CheckNexttowardfBits();
+    CheckNexttowardfEnvironment();
     CheckRemainderf();
     CheckTanhConsoleBits();
     CheckSinhMsunBits();

@@ -4135,6 +4135,33 @@ double APS5_VABI nextafter_nid_postfix(double x, double y) {
     }
     return std::bit_cast<double>(next);
 }
+float APS5_VABI nexttowardf_nid_postfix(float x, long double y) {
+    const std::uint32_t ux = std::bit_cast<std::uint32_t>(x);
+    const bool xIsNan = (ux & 0x7fffffffu) > 0x7f800000u;
+    if (xIsNan || std::isnan(y)) {
+        return static_cast<float>(static_cast<long double>(x) + y);
+    }
+    if (static_cast<long double>(x) == y) {
+        return static_cast<float>(y);
+    }
+    if ((ux & 0x7fffffffu) == 0) {
+        const volatile float smallest = std::bit_cast<float>((std::signbit(y) ? 0x80000000u : 0u) | 1u);
+        volatile float product = smallest * smallest;
+        return product == smallest ? product : smallest;
+    }
+    const bool towardLargerMagnitude = (y > static_cast<long double>(x)) == ((ux & 0x80000000u) == 0);
+    const std::uint32_t next = towardLargerMagnitude ? ux + 1 : ux - 1;
+    const std::uint32_t exponent = next & 0x7f800000u;
+    if (exponent == 0x7f800000u) {
+        _Feraise_nid_postfix(0x08);
+        return x + x;
+    }
+    if (exponent == 0) {
+        volatile float product = x * x;
+        if (product != x) _Feraise_nid_postfix(0x10);
+    }
+    return std::bit_cast<float>(next);
+}
 int APS5_VABI __isfinite_nid_postfix(double x) { return std::isfinite(x) ? 1 : 0; }
 int APS5_VABI __isnan_nid_postfix(double x) { return std::isnan(x) ? 1 : 0; }
 int APS5_VABI __isinf_nid_postfix(double x) { return std::isinf(x) ? 1 : 0; }
