@@ -2,7 +2,9 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include "prx/libSceAvPlayer/include/AvPlayer.hpp"
+#include "prx/libc/include/HostThread.hpp"
 #include "prx/libSceAvPlayer/include/HttpStream.hpp"
+#include "prx/libSceAvPlayer/include/FileReplacementStream.hpp"
 #include "prx/libc/include/General.hpp"
 #include "prx/libc/include/FilesystemError.hpp"
 
@@ -35,10 +37,10 @@ constexpr std::uint32_t AudioBufferAlignment = 0x10;
 constexpr std::uint32_t AudioChunkSamples = 1024;
 constexpr std::uint32_t AudioMaxChannels = 8;
 constexpr std::uint32_t VideoDecodeAheadFrames = 4;
+constexpr std::uint32_t UnsyncedVideoDecodeAheadFrames = 12;
 constexpr std::size_t VideoPacketLimit = 30;
 constexpr std::size_t AudioPacketLimit = 8;
 constexpr std::size_t AudioOnlyPacketLimit = 30;
-constexpr int AvioBufferSize = 64 * 1024;
 
 std::uint32_t AlignUp(std::uint32_t value, std::uint32_t alignment) {
     return (value + alignment - 1) / alignment * alignment;
@@ -74,68 +76,6 @@ bool HasAspect(AVRational sampleAspect) {
 float SampleAspect(AVRational sampleAspect) {
     return HasAspect(sampleAspect) ? static_cast<float>(av_q2d(sampleAspect)) : 0.0f;
 }
-
-class FileReplacementStream {
-public:
-    explicit FileReplacementStream(const AvPlayerFileReplacement& callbacks) : file(callbacks) {}
-
-    ~FileReplacementStream() {
-        if (context) {
-            av_freep(&context->buffer);
-            avio_context_free(&context);
-        }
-        if (opened) file.close(file.object_ptr);
-    }
-
-    FileReplacementStream(const FileReplacementStream&) = delete;
-    FileReplacementStream& operator=(const FileReplacementStream&) = delete;
-
-    bool Open(const std::string& path) {
-        if (file.open(file.object_ptr, path.c_str()) < 0) return false;
-        opened = true;
-        size = file.size(file.object_ptr);
-        auto* buffer = static_cast<std::uint8_t*>(av_malloc(AvioBufferSize));
-        if (!buffer) return false;
-        context = avio_alloc_context(buffer, AvioBufferSize, 0, this, &FileReplacementStream::read, nullptr, &FileReplacementStream::seek);
-        if (!context) av_free(buffer);
-        return context != nullptr;
-    }
-
-    AVIOContext* Context() const { return context; }
-
-private:
-    static int read(void* opaque, std::uint8_t* buffer, int size) {
-        auto* self = static_cast<FileReplacementStream*>(opaque);
-        if (self->position >= self->size) return AVERROR_EOF;
-        const auto length = static_cast<std::uint32_t>(std::min<std::uint64_t>(static_cast<std::uint64_t>(size), self->size - self->position));
-        const auto read = self->file.read_offset(self->file.object_ptr, buffer, self->position, length);
-        if (read < 0) return AVERROR(EIO);
-        if (read == 0) return AVERROR_EOF;
-        self->position += static_cast<std::uint64_t>(read);
-        return read;
-    }
-
-    static std::int64_t seek(void* opaque, std::int64_t offset, int whence) {
-        auto* self = static_cast<FileReplacementStream*>(opaque);
-        if (whence & AVSEEK_SIZE) return static_cast<std::int64_t>(self->size);
-        std::int64_t base = 0;
-        switch (whence & ~AVSEEK_FORCE) {
-        case SEEK_SET: base = 0; break;
-        case SEEK_CUR: base = static_cast<std::int64_t>(self->position); break;
-        case SEEK_END: base = static_cast<std::int64_t>(self->size); break;
-        default: return -1;
-        }
-        const auto target = std::clamp<std::int64_t>(base + offset, 0, static_cast<std::int64_t>(self->size));
-        self->position = static_cast<std::uint64_t>(target);
-        return target;
-    }
-
-    AvPlayerFileReplacement file;
-    bool opened = false;
-    std::uint64_t size = 0;
-    std::uint64_t position = 0;
-    AVIOContext* context = nullptr;
-};
 
 class Clock {
 public:
@@ -368,6 +308,7 @@ public:
             minEpoch = 1;
             clockEpoch = 0;
             loopEpochs.clear();
+            loopWarning.reset();
             audioDriving = false;
             presented = false;
             lastPresented = 0;
@@ -385,9 +326,9 @@ public:
         }
         started = true;
         for (auto* decoder : {&video, &audio}) {
-            if (decoder->stream >= 0) decoder->thread = std::thread([this, decoder] { decodeLoop(*decoder); });
+            if (decoder->stream >= 0) decoder->thread = Libc::StartHostThread([this, decoder] { decodeLoop(*decoder); });
         }
-        demuxer = std::thread([this] { demuxLoop(); });
+        demuxer = Libc::StartHostThread([this] { demuxLoop(); });
         return SCE_OK;
     }
 
@@ -603,6 +544,7 @@ private:
         if (front.epoch > clockEpoch) {
             if (synced && audioDriving && speed == NormalSpeed) return false;
             if (synced && front.seamless && presented && presentationClock.Now() < static_cast<double>(lastPresented + frameDuration())) return false;
+            if (holdForLoopWarning(front.epoch)) return false;
             presentationClock.Rebase(static_cast<double>(front.info.timestamp));
             clockEpoch = front.epoch;
         }
@@ -626,13 +568,15 @@ private:
             reconcileExhaustedAudioClock();
             return false;
         }
+        if (holdForLoopWarning(frames.front().epoch)) return false;
         const auto epoch = frames.front().epoch;
+        const bool unsynced = syncMode != SyncModeDefault;
         present(audio, info);
         const auto currentClock = presentationClock.Now();
         const auto timestamp = static_cast<double>(info.timestamp);
         lastAudioTimestamp = timestamp;
         audioHasTimestamp = true;
-        const bool drifted = currentClock > timestamp + 50.0 || timestamp > currentClock + 50.0;
+        const bool drifted = currentClock > timestamp + 50.0 || (!unsynced && timestamp > currentClock + 50.0);
         const bool exhausted = audioExhausted() && !audioClockReconciled();
         const bool shouldRebase = !audioDriving || epoch > clockEpoch || drifted || exhausted;
         audioDriving = true;
@@ -740,16 +684,20 @@ private:
 
     void addVideoDecodeAheadBuffers() {
         if (video.stream < 0) return;
+        if (syncMode != SyncModeDefault && addVideoBuffers(UnsyncedVideoDecodeAheadFrames)) return;
+        addVideoBuffers(VideoDecodeAheadFrames);
+    }
 
+    bool addVideoBuffers(std::uint32_t count) {
         const auto& memory = settings.memory;
         std::vector<std::uint8_t*> extra;
-        extra.reserve(VideoDecodeAheadFrames);
-        for (std::uint32_t index = 0; index < VideoDecodeAheadFrames; ++index) {
+        extra.reserve(count);
+        for (std::uint32_t index = 0; index < count; ++index) {
             auto* buffer = static_cast<std::uint8_t*>(memory.allocate_texture(
                 memory.object_ptr, VideoBufferAlignment, video.bufferSize));
             if (!buffer) {
                 for (auto* allocated : extra) memory.deallocate_texture(memory.object_ptr, allocated);
-                return;
+                return false;
             }
             extra.push_back(buffer);
         }
@@ -757,6 +705,7 @@ private:
             video.allocated.push_back(buffer);
             video.free.push_back(buffer);
         }
+        return true;
     }
 
     void releaseDecoders() {
@@ -823,12 +772,13 @@ private:
         decoder.current = std::move(decoder.frames.front());
         decoder.frames.pop_front();
         info = decoder.current->info;
-        bool looped = false;
-        while (!loopEpochs.empty() && loopEpochs.front() <= decoder.current->epoch) {
-            looped = looped || loopEpochs.front() == decoder.current->epoch;
-            loopEpochs.pop_front();
-        }
-        if (looped) events.OnWarning(SCE_AVPLAYER_ERROR_WAR_LOOPING_BACK);
+        while (!loopEpochs.empty() && loopEpochs.front() <= decoder.current->epoch) loopEpochs.pop_front();
+    }
+
+    bool holdForLoopWarning(std::uint64_t epoch) {
+        if (std::find(loopEpochs.begin(), loopEpochs.end(), epoch) == loopEpochs.end()) return false;
+        if (!loopWarning || loopWarning->first != epoch) loopWarning = std::pair{epoch, events.OnWarning(SCE_AVPLAYER_ERROR_WAR_LOOPING_BACK)};
+        return !events.WarningDelivered(loopWarning->second);
     }
 
     void dropLateAudio() {
@@ -870,6 +820,7 @@ private:
                     ++demuxEpoch;
                     minEpoch = demuxEpoch;
                     loopEpochs.clear();
+                    loopWarning.reset();
                     for (auto* decoder : {&video, &audio}) {
                         if (decoder->stream < 0) continue;
                         for (auto& item : decoder->packets) av_packet_free(&item.packet);
@@ -1192,6 +1143,7 @@ private:
     std::uint64_t minEpoch = 0;
     std::uint64_t clockEpoch = 0;
     std::deque<std::uint64_t> loopEpochs;
+    std::optional<std::pair<std::uint64_t, std::uint64_t>> loopWarning;
     bool audioDriving = false;
     bool audioHasTimestamp = false;
     double lastAudioTimestamp = 0.0;
