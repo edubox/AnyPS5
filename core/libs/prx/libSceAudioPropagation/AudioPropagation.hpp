@@ -13,6 +13,7 @@ namespace AudioPropagation {
 inline constexpr std::int32_t ErrorInvalidArgument = static_cast<std::int32_t>(0x8A700001);
 inline constexpr std::int32_t ErrorInvalidHandle = static_cast<std::int32_t>(0x8A700002);
 inline constexpr std::int32_t ErrorNullPointer = static_cast<std::int32_t>(0x8A700003);
+inline constexpr std::int32_t ErrorInvalidDescriptor = static_cast<std::int32_t>(0x8A700007);
 
 inline constexpr std::uint32_t MaterialId = 0x010107d1;
 inline constexpr std::size_t MaterialSize = 0x40;
@@ -27,6 +28,16 @@ inline constexpr std::uint32_t PortalParamsId = 0x010107d8;
 inline constexpr std::size_t PortalParamsSize = 0x60;
 inline constexpr std::uint32_t PathEntryId = 0x010107d9;
 inline constexpr std::size_t PathEntrySize = 0x28;
+
+inline constexpr std::uint32_t SystemRayCount = 0x40;
+inline constexpr std::uint32_t SourceRayCount = 6;
+
+struct Ray {
+    AudioPropagationStructDescriptor desc;
+    std::byte opaque[RaySize - sizeof(AudioPropagationStructDescriptor)];
+};
+
+static_assert(sizeof(Ray) == RaySize);
 
 inline constexpr std::uint32_t SystemOptionsId = 0x010107d5;
 inline constexpr std::size_t SystemOptionsSize = 56;
@@ -175,6 +186,19 @@ static_assert(sizeof(AudioPath) == 224);
 static_assert(offsetof(AudioPath, points) == 16);
 static_assert(offsetof(AudioPath, pointCount) == 208);
 static_assert(offsetof(AudioPath, flags) == 212);
+
+struct AudioPathEntry {
+    AudioPropagationStructDescriptor desc;
+    AudioPropagationHandle path;
+    const AudioPath* data;
+    float gain;
+    std::uint32_t reserved;
+};
+
+static_assert(sizeof(AudioPathEntry) == PathEntrySize);
+static_assert(offsetof(AudioPathEntry, path) == 0x10);
+static_assert(offsetof(AudioPathEntry, data) == 0x18);
+static_assert(offsetof(AudioPathEntry, gain) == 0x20);
 
 struct RenderInfo {
     AudioPropagationStructDescriptor desc;

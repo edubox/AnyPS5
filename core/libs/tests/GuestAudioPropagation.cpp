@@ -442,25 +442,92 @@ int main() {
     badPath.points[0].position[0] = std::numeric_limits<float>::infinity();
     RequireThrows<std::invalid_argument>([&] { sceAudioPropagationSourceSetAudioPath(path, &badPath, 1.0f); }, "nonfinite point position");
     RequireThrows<std::invalid_argument>([&] { sceAudioPropagationSourceSetAudioPath(path, &configured, std::numeric_limits<float>::quiet_NaN()); }, "nonfinite path gain");
+    RequireThrows<std::invalid_argument>([&] { sceAudioPropagationSourceSetAudioPath(path, &configured, 1.5f); }, "path gain above the module's maximum");
     RequireThrows<std::invalid_argument>([&] { sceAudioPropagationSourceSetAudioPath(path, nullptr, 1.0f); }, "null path data");
     Require(sceAudioPropagationPathGetNumPoints(path, &count) == 0 && count == 2, "rejected update changed path state");
 
-    std::uint8_t rays[AudioPropagation::RaySize * 2]{};
-    count = 7;
-    Require(sceAudioPropagationSystemGetRays(system, rays, &count) == 0 && count == 0, "system requested rays");
-    count = 7;
-    Require(sceAudioPropagationSourceGetRays(source, rays, &count) == 0 && count == 0, "source requested rays");
-    Require(sceAudioPropagationSourceGetRays(source, rays, reinterpret_cast<std::uint32_t*>(0x10)) == AudioPropagation::ErrorNullPointer, "unwritable source ray count");
-    RequireThrows<std::invalid_argument>([&] { sceAudioPropagationSourceGetRays(source, rays, nullptr); }, "rays without count");
-    Require(sceAudioPropagationSystemSetRays(system, rays, 0) == 0, "empty ray results failed");
-    RequireThrows<std::runtime_error>([&] { sceAudioPropagationSystemSetRays(system, rays, 1); }, "unrequested ray results");
-    Require(sceAudioPropagationSourceCalculateAudioPaths(source, rays, 0, 1, nullptr, 0) == AudioPropagation::ErrorNullPointer, "path calculation null output");
+    std::vector<AudioPropagation::Ray> systemRays(AudioPropagation::SystemRayCount);
+    for (auto& ray : systemRays) ray.desc = {AudioPropagation::RayId, AudioPropagation::RaySize};
+    count = AudioPropagation::SystemRayCount;
+    Require(sceAudioPropagationSystemGetRays(system, systemRays.data(), &count) == 0 && count == AudioPropagation::SystemRayCount, "system rays");
+    count = AudioPropagation::SystemRayCount - 1;
+    Require(sceAudioPropagationSystemGetRays(system, systemRays.data(), &count) == AudioPropagation::ErrorInvalidArgument, "system ray capacity");
+    systemRays[5].desc.size = 0;
+    count = AudioPropagation::SystemRayCount;
+    Require(sceAudioPropagationSystemGetRays(system, systemRays.data(), &count) == AudioPropagation::ErrorInvalidDescriptor, "system ray descriptor");
+    systemRays[5].desc.size = AudioPropagation::RaySize;
+
+    std::vector<AudioPropagation::Ray> sourceRays(AudioPropagation::SourceRayCount);
+    for (auto& ray : sourceRays) ray.desc = {AudioPropagation::RayId, AudioPropagation::RaySize};
+    count = AudioPropagation::SourceRayCount;
+    Require(sceAudioPropagationSourceGetRays(source, sourceRays.data(), &count) == 0 && count == AudioPropagation::SourceRayCount, "source requested rays");
+    Require(sceAudioPropagationSourceGetRays(source, sourceRays.data(), reinterpret_cast<std::uint32_t*>(0x10)) == AudioPropagation::ErrorNullPointer, "unwritable source ray count");
+    RequireThrows<std::invalid_argument>([&] { sceAudioPropagationSourceGetRays(source, sourceRays.data(), nullptr); }, "rays without count");
+    count = 0;
+    Require(sceAudioPropagationSourceGetRays(source, sourceRays.data(), &count) == AudioPropagation::ErrorInvalidArgument, "source ray capacity");
+    sourceRays[0].desc.id = 0;
+    count = AudioPropagation::SourceRayCount;
+    Require(sceAudioPropagationSourceGetRays(source, sourceRays.data(), &count) == AudioPropagation::ErrorInvalidDescriptor, "source ray descriptor");
+    sourceRays[0].desc.id = AudioPropagation::RayId;
+    Require(sceAudioPropagationSystemSetRays(system, systemRays.data(), 0) == 0, "empty ray results failed");
+    RequireThrows<std::runtime_error>([&] { sceAudioPropagationSystemSetRays(system, systemRays.data(), 1); }, "unrequested ray results");
+
+    std::vector<AudioPropagation::AudioPath> calculated(6);
+    for (auto& computed : calculated) computed.desc = {AudioPropagation::PathId, sizeof(AudioPropagation::AudioPath)};
+    Require(sceAudioPropagationSourceCalculateAudioPaths(source, sourceRays.data(), 0, 1, nullptr, 0) == AudioPropagation::ErrorNullPointer, "path calculation null output");
     Require(sceAudioPropagationSourceCalculateAudioPaths(0, nullptr, 0, 0, nullptr, 0) == AudioPropagation::ErrorInvalidHandle, "path calculation handle precedence");
-    Require(sceAudioPropagationSourceCalculateAudioPaths(source, rays, 0, 1, rays, 6) == AudioPropagation::ErrorInvalidArgument, "path calculation empty rays");
-    Require(sceAudioPropagationSourceCalculateAudioPaths(source, rays, 6, 0, rays, 6) == AudioPropagation::ErrorInvalidArgument, "path calculation zero reflection order");
-    Require(sceAudioPropagationSourceCalculateAudioPaths(source, rays, 6, 1, rays, 0) == AudioPropagation::ErrorInvalidArgument, "path calculation zero output capacity");
-    Require(sceAudioPropagationSourceSetAudioPaths(source, nullptr, 0) == 0, "empty audio paths failed");
-    RequireThrows<std::runtime_error>([&] { sceAudioPropagationSourceSetAudioPaths(source, rays, 1); }, "set audio paths");
+    Require(sceAudioPropagationSourceCalculateAudioPaths(source, sourceRays.data(), 0, 1, calculated.data(), 6) == AudioPropagation::ErrorInvalidArgument, "path calculation empty rays");
+    Require(sceAudioPropagationSourceCalculateAudioPaths(source, sourceRays.data(), 6, 0, calculated.data(), 6) == AudioPropagation::ErrorInvalidArgument, "path calculation zero reflection order");
+    Require(sceAudioPropagationSourceCalculateAudioPaths(source, sourceRays.data(), 6, 1, calculated.data(), 0) == AudioPropagation::ErrorInvalidArgument, "path calculation zero output capacity");
+    calculated[4].desc.size = 0;
+    Require(sceAudioPropagationSourceCalculateAudioPaths(source, sourceRays.data(), 6, 1, calculated.data(), 6) == AudioPropagation::ErrorInvalidDescriptor, "path calculation descriptor");
+    calculated[4].desc.size = sizeof(AudioPropagation::AudioPath);
+    for (auto& computed : calculated) {
+        computed.pointCount = 2;
+        computed.flags = 0;
+    }
+    Require(sceAudioPropagationSourceCalculateAudioPaths(source, sourceRays.data(), AudioPropagation::SourceRayCount, 1, calculated.data(), 6) == 0, "path calculation failed");
+    for (const auto& computed : calculated) Require(computed.pointCount == 0 && (computed.flags & AudioPropagation::PathInvalid) != 0, "calculated path kept points or lost the invalid flag");
+
+    AudioPropagation::AudioPath stored{};
+    stored.desc = {AudioPropagation::PathId, sizeof(stored)};
+    stored.flags = AudioPropagation::PathInvalid;
+    stored.pointCount = 1;
+    stored.points[0].desc = {AudioPropagation::PathPointId, sizeof(AudioPropagation::PathPoint)};
+    stored.points[0].gain = 1.0f;
+    stored.points[0].position[0] = 1.0f;
+    std::vector<AudioPropagation::AudioPathEntry> entries(2);
+    AudioPropagationHandle entryPaths[2] = {};
+    for (std::size_t index = 0; index < entries.size(); ++index) {
+        Require(sceAudioPropagationSourceGetAudioPath(source, static_cast<std::uint32_t>(index + 1), &entryPaths[index]) == 0, "entry path lookup");
+        entries[index].desc = {AudioPropagation::PathEntryId, AudioPropagation::PathEntrySize};
+        entries[index].path = entryPaths[index];
+        entries[index].data = &calculated[index];
+        entries[index].gain = 1.0f;
+    }
+    entries[1].data = &stored;
+    Require(sceAudioPropagationSourceSetAudioPaths(source, nullptr, 0) == AudioPropagation::ErrorNullPointer, "null audio path entries");
+    Require(sceAudioPropagationSourceSetAudioPaths(source, entries.data(), 0) == AudioPropagation::ErrorInvalidArgument, "empty audio path entries");
+    auto badEntry = entries;
+    badEntry[0].desc.id = 0;
+    Require(sceAudioPropagationSourceSetAudioPaths(source, badEntry.data(), 2) == AudioPropagation::ErrorInvalidDescriptor, "audio path entry descriptor");
+    badEntry = entries;
+    badEntry[1].data = nullptr;
+    Require(sceAudioPropagationSourceSetAudioPaths(source, badEntry.data(), 2) == AudioPropagation::ErrorNullPointer, "audio path entry data");
+    badEntry = entries;
+    badEntry[1].gain = 1.5f;
+    Require(sceAudioPropagationSourceSetAudioPaths(source, badEntry.data(), 2) == AudioPropagation::ErrorInvalidArgument, "audio path entry gain");
+    auto badData = calculated;
+    badData[0].desc.size = 0;
+    badEntry = entries;
+    badEntry[0].data = &badData[0];
+    Require(sceAudioPropagationSourceSetAudioPaths(source, badEntry.data(), 2) == AudioPropagation::ErrorInvalidDescriptor, "audio path entry data descriptor");
+    badEntry = entries;
+    badEntry[0].path = source;
+    Require(sceAudioPropagationSourceSetAudioPaths(source, badEntry.data(), 2) == AudioPropagation::ErrorInvalidHandle, "audio path entry handle");
+    Require(sceAudioPropagationSourceSetAudioPaths(0, entries.data(), 2) == AudioPropagation::ErrorInvalidHandle, "audio path source handle");
+    Require(sceAudioPropagationSourceSetAudioPaths(source, entries.data(), 2) == 0, "set audio paths failed");
+    Require(sceAudioPropagationPathGetNumPoints(entryPaths[1], &count) == 0 && count == 1, "set audio paths did not store the entry");
 
     std::vector<std::uint64_t> otherArenaStorage(arenaStorage.size());
     auto* otherArena = reinterpret_cast<std::uint8_t*>(otherArenaStorage.data());
