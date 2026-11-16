@@ -260,16 +260,29 @@ std::int32_t APS5_VABI sceHmd2Open(std::int32_t userId, std::int32_t type, std::
 }
 
 int APS5_VABI sceHmd2ReprojectionBeginFrame(std::uint64_t frameId) {
+    (void)frameId;
+    {
+        std::lock_guard lock(reprojectionMutex);
+        if (reprojectionState == nullptr) return Hmd2::ReprojectionNotInitialized;
+    }
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
 
 int APS5_VABI sceHmd2ReprojectionDisableMirroring() {
+    {
+        std::lock_guard lock(reprojectionMutex);
+        if (reprojectionState == nullptr) return Hmd2::ReprojectionNotInitialized;
+    }
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
 
 int APS5_VABI sceHmd2ReprojectionDisableVrMode() {
+    {
+        std::lock_guard lock(reprojectionMutex);
+        if (reprojectionState == nullptr) return Hmd2::ReprojectionNotInitialized;
+    }
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
@@ -357,6 +370,20 @@ int APS5_VABI sceHmd2ReprojectionSetAllowPositionalReprojection(std::uint8_t mod
 }
 
 int APS5_VABI sceHmd2ReprojectionSetMirroringOption(const Hmd2::MirroringOption* option) {
+    {
+        std::lock_guard lock(reprojectionMutex);
+        if (reprojectionState == nullptr) return Hmd2::ReprojectionNotInitialized;
+    }
+    if (option == nullptr) return Hmd2::ParameterNull;
+    Hmd2::MirroringOption local{};
+    const int savedErrno = errno;
+    const bool copied = GuestCopyIn_nid_no_patch(&local, option, sizeof(local));
+    errno = savedErrno;
+    if (!copied) return Hmd2::ParameterNull;
+    if (local.mode > 1) return Hmd2::ParameterInvalid;
+    for (const auto reserved : local.reserved) {
+        if (reserved != 0) return Hmd2::ParameterInvalid;
+    }
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
