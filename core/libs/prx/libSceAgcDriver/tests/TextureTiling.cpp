@@ -6,6 +6,7 @@
 #include "prx/libSceAgcDriver/Graphics/include/TextureFormat.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/TextureSwizzleEquations.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/TextureTiling.hpp"
+#include "prx/libc/include/GuestAllocations.hpp"
 #include <algorithm>
 #include <array>
 #include <bit>
@@ -1026,5 +1027,55 @@ void RunTextureTilingTests() {
         auto cube = array;
         cube.dimension = TextureDimension::kCube;
         reject([&] { static_cast<void>(ArrayLayerWindow(cube, 2048)); }, "not a 1D or 2D array");
+    }
+    {
+        GuestTextureResource array{};
+        array.baseAddress = 0x5f0000000000ull;
+        array.width = 2560;
+        array.height = 1440;
+        array.depthOrLastArray = 1700;
+        array.baseArray = 3;
+        array.mipCount = 1;
+        array.tileMode = TextureTileMode::kStandard64KB;
+        array.dimension = TextureDimension::k2DArray;
+        array.format = 56;
+        const auto geometry = DescribeSurface(array);
+        const auto slices = static_cast<std::size_t>(geometry.layerBytes * 46);
+        GuestAllocations::Mutation mutation;
+        mutation.Add(reinterpret_cast<void*>(array.baseAddress), slices, true, true, true);
+
+        const auto window = GuestAllocationLayerWindow(array);
+        Require(window.depthOrLastArray == 45 && window.baseArray == array.baseArray && window.baseAddress == array.baseAddress, "an array view must be cut to the slices its guest allocation holds");
+        Require(DescribeSurface(window).layers == 46 && DescribeSurface(window).layerBytes == geometry.layerBytes, "a cut array view must keep the layout of the whole array's slices");
+        Require(window.baseAddress + DescribeSurface(window).guestBytes <= array.baseAddress + slices, "a cut array view must lie inside its guest allocation");
+
+        auto metadata = array;
+        metadata.dccAddress = 0x5f0000c00000ull;
+        Require(GuestAllocationLayerWindow(metadata).depthOrLastArray == 45 && GuestAllocationLayerWindow(metadata).dccAddress == metadata.dccAddress, "a cut array view with DCC metadata keeps its base and metadata");
+
+        GuestTextureResource outside{};
+        outside.baseAddress = 0x6f0000000000ull;
+        outside.width = 2560;
+        outside.height = 1440;
+        outside.depthOrLastArray = 1700;
+        outside.mipCount = 1;
+        outside.tileMode = TextureTileMode::kStandard64KB;
+        outside.dimension = TextureDimension::k2DArray;
+        outside.format = 56;
+        const auto untouched = GuestAllocationLayerWindow(outside);
+        Require(untouched.baseAddress == outside.baseAddress && untouched.depthOrLastArray == outside.depthOrLastArray, "an array view outside every guest allocation keeps its descriptor");
+
+        mutation.Remove(reinterpret_cast<void*>(array.baseAddress));
+        mutation.Add(reinterpret_cast<void*>(array.baseAddress), static_cast<std::size_t>(geometry.layerBytes * 1701), true, true, true);
+        const auto whole = GuestAllocationLayerWindow(array);
+        Require(whole.baseAddress == array.baseAddress && whole.depthOrLastArray == array.depthOrLastArray, "an array whose guest allocation holds every slice keeps its descriptor");
+
+        auto flat = array;
+        flat.dimension = TextureDimension::k2D;
+        Require(GuestAllocationLayerWindow(flat).depthOrLastArray == flat.depthOrLastArray, "a 2D image is not cut by the guest allocation");
+        auto volume = array;
+        volume.dimension = TextureDimension::k3D;
+        Require(GuestAllocationLayerWindow(volume).depthOrLastArray == volume.depthOrLastArray, "a volume is not cut by the guest allocation");
+        mutation.Remove(reinterpret_cast<void*>(array.baseAddress));
     }
 }
