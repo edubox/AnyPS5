@@ -3,13 +3,16 @@
 #include "prx/libSceAgcDriver/Graphics/include/RuntimeSwitches.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/TextureFormat.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/TextureSwizzleEquations.hpp"
-#include <string>
+#include "prx/libc/include/GuestAllocations.hpp"
 #include <algorithm>
+#include <atomic>
 #include <bit>
 #include <cstddef>
 #include <cstdint>
+#include <cstdio>
 #include <span>
 #include <stdexcept>
+#include <string>
 
 namespace AgcDriver::Graphics {
 
@@ -823,6 +826,31 @@ GuestTextureResource ArrayLayerWindow(const GuestTextureResource& viewed, std::u
     window.depthOrLastArray = viewed.depthOrLastArray - viewed.baseArray;
     window.baseArray = 0;
     return window;
+}
+
+GuestTextureResource GuestAllocationLayerWindow(const GuestTextureResource& viewed) {
+    const bool layered = viewed.dimension == TextureDimension::k2DArray || viewed.dimension == TextureDimension::k1DArray;
+    if (!layered) return viewed;
+    const auto range = GuestAllocations::GuestAllocationsLookup_nid_postfix(viewed.baseAddress, false);
+    if (range == nullptr || range->allocationBytes == 0) return viewed;
+    const auto limit = range->allocationAddress + range->allocationBytes;
+    if (limit <= viewed.baseAddress) return viewed;
+    try {
+        const auto geometry = DescribeSurface(viewed);
+        if (geometry.thick || geometry.layerBytes == 0 || geometry.layers != static_cast<std::uint64_t>(viewed.depthOrLastArray) + 1u) return viewed;
+        const auto fitting = (limit - viewed.baseAddress) / geometry.layerBytes;
+        if (fitting >= geometry.layers || fitting <= viewed.baseArray) return viewed;
+        static std::atomic<std::uint64_t> windows{0};
+        const auto count = windows.fetch_add(1) + 1;
+        if (count <= 5 || (count & (count - 1)) == 0) {
+            std::fprintf(stderr, "[gpu] array view 0x%llx (%ux%u format %u, slices %u..%u, %llu MiB) cut to the %llu slices its guest allocation holds; %llu such views\n", static_cast<unsigned long long>(viewed.baseAddress), viewed.width, viewed.height, viewed.format, viewed.baseArray, viewed.depthOrLastArray, static_cast<unsigned long long>(geometry.guestBytes >> 20u), static_cast<unsigned long long>(fitting), static_cast<unsigned long long>(count));
+        }
+        auto window = viewed;
+        window.depthOrLastArray = static_cast<std::uint32_t>(fitting - 1u);
+        return window;
+    } catch (const std::runtime_error&) {
+        return viewed;
+    }
 }
 
 std::vector<TileMipLayout> ComputeElementMipLayout(TextureTileMode tileMode, std::uint32_t bytesPerElement, std::uint32_t width, std::uint32_t height, std::uint32_t mipCount) {

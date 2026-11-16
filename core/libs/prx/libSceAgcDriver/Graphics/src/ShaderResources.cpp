@@ -983,8 +983,8 @@ PendingLookup pendingLookupSource(const Context& context, const GuestTextureReso
 // `guestBytes` is the surface size when the caller described the surface already (0: described here).
 std::shared_ptr<Texture> cachedTexture(const Context& context, std::span<const std::uint32_t> words, const GuestTextureResource& requested, VkComponentMapping components, std::uint64_t guestBytes = 0, bool depthCompare = false, VkImageViewType multisampleViewType = VK_IMAGE_VIEW_TYPE_2D, bool layerRows = false) {
     Require(!layerRows || (requested.dimension == TextureDimension::k1DArray && !depthCompare), "only a sampled 1D array is laid out as rows of a 2D image");
-    const auto resource = layerRows ? requested : ArrayLayerWindow(requested, context.limits.maxImageArrayLayers);
-    if (resource.baseAddress != requested.baseAddress) guestBytes = 0;
+    const auto resource = layerRows ? requested : GuestAllocationLayerWindow(ArrayLayerWindow(requested, context.limits.maxImageArrayLayers));
+    if (resource.baseAddress != requested.baseAddress || resource.depthOrLastArray != requested.depthOrLastArray) guestBytes = 0;
     if (resource.dimension == TextureDimension::k2DMsaa) {
         Require(!depthCompare, "native multisampled depth comparison sampling is not implemented");
         if (auto depth = DepthSurfaceTexture(context, words, resource, components, multisampleViewType)) {
@@ -1520,13 +1520,13 @@ static WrittenStorage WrittenStorageBytes(const GuestTextureResource& viewed, st
 
 static void claimStoredMultisampleMemory(const Context& context, const GuestTextureResource& resource, std::uint64_t guestBytes, std::uint32_t mip) {
     if (!MultisampleColorTargetOverlaps(resource.baseAddress, guestBytes)) return;
-    for (const auto& [begin, end] : WrittenStorageBytes(ArrayLayerWindow(resource, context.limits.maxImageArrayLayers), mip).bytes) ClaimMultisampleTargetStore(begin, end - begin);
+    for (const auto& [begin, end] : WrittenStorageBytes(GuestAllocationLayerWindow(ArrayLayerWindow(resource, context.limits.maxImageArrayLayers)), mip).bytes) ClaimMultisampleTargetStore(begin, end - begin);
 }
 
 // `guestBytes` is the surface size when the caller described the surface already (0: described here).
 std::shared_ptr<StorageTexture> cachedStorageTexture(const Context& context, std::span<const std::uint32_t> words, const GuestTextureResource& requested, std::uint32_t mip, std::uint64_t guestBytes, bool written, std::optional<std::pair<std::uint32_t, std::uint32_t>> layers) {
-    const auto viewed = ArrayLayerWindow(requested, context.limits.maxImageArrayLayers);
-    if (viewed.baseAddress != requested.baseAddress) guestBytes = 0;
+    const auto viewed = GuestAllocationLayerWindow(ArrayLayerWindow(requested, context.limits.maxImageArrayLayers));
+    if (viewed.baseAddress != requested.baseAddress || viewed.depthOrLastArray != requested.depthOrLastArray) guestBytes = 0;
     Require(viewed.dimension != TextureDimension::k2DMsaa, "storage image access to a multisampled texture is not implemented");
     const auto viewedBytes = guestBytes != 0 ? guestBytes : SurfaceGuestBytes(viewed);
     RequireNoMultisampleTarget(viewed.baseAddress, static_cast<std::size_t>(viewedBytes), "a storage image access");
@@ -1915,7 +1915,7 @@ bool StorageImageServesKeys(const StorageTexture& image, std::uint64_t dccAddres
 std::shared_ptr<StorageTexture> RepeatStorageSurface(const Context& context, const GuestTextureResource& requested, const std::shared_ptr<StorageTexture>& stored) {
     static const bool disabled = std::getenv("APS5_NO_TEXTURE_CACHE") != nullptr;
     if (disabled || stored == nullptr) return nullptr;
-    const auto viewed = ArrayLayerWindow(requested, context.limits.maxImageArrayLayers);
+    const auto viewed = GuestAllocationLayerWindow(ArrayLayerWindow(requested, context.limits.maxImageArrayLayers));
     Require(viewed.dimension != TextureDimension::k2DMsaa, "storage image access to a multisampled texture is not implemented");
     const auto viewedBytes = SurfaceGuestBytes(viewed);
     RequireNoMultisampleTarget(viewed.baseAddress, static_cast<std::size_t>(viewedBytes), "a storage image access");
