@@ -1012,6 +1012,16 @@ if(BUILD_TESTING)
             "PATH=path_list_prepend:$<TARGET_FILE_DIR:libSceRemoteplay>")
     endif()
 
+    add_test_executable(guest_dipsw_tests tests/GuestDipsw.cpp)
+    target_include_directories(guest_dipsw_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+    target_link_libraries(guest_dipsw_tests PRIVATE libSceDipsw libc)
+    configure_windows_unwind(guest_dipsw_tests)
+    add_test(NAME guest_dipsw COMMAND guest_dipsw_tests)
+    if(WIN32)
+        set_tests_properties(guest_dipsw PROPERTIES ENVIRONMENT_MODIFICATION
+            "PATH=path_list_prepend:$<TARGET_FILE_DIR:libSceDipsw>")
+    endif()
+
     add_test_executable(guest_gnm_neo_retail_tests tests/GuestGnmNeoRetail.cpp)
     target_include_directories(guest_gnm_neo_retail_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
     target_link_libraries(guest_gnm_neo_retail_tests PRIVATE libSceGnmDriverForNeoMode libc)

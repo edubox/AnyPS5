@@ -1,10 +1,11 @@
 #pragma once
 
 #include "SceTypes.hpp"
+#include <cstdint>
 
 extern "C" {
 
-int APS5_VABI sceKernelCheckDipsw();
+int APS5_VABI sceKernelCheckDipsw(std::uint32_t id);
 int APS5_VABI sceKernelInitializeDipsw();
 int APS5_VABI sceKernelIsAssistMode();
 int APS5_VABI sceKernelIsDevelopmentMode();

@@ -3,11 +3,13 @@
 #include <cstddef>
 #include "SceTypes.hpp"
 #include "prx/libc/include/General.hpp"
+#include "prx/libkernel/include/Api.hpp"
+#include <cerrno>
 
 extern "C" {
 
-int APS5_VABI sceKernelCheckDipsw() {
-    NotImplemented_nid_no_patch(__func__);
+int APS5_VABI sceKernelCheckDipsw(std::uint32_t id) {
+    if (id >= 0x100u) return sceKernelError(EINVAL);
     return 0;
 }
 
@@ -17,22 +19,19 @@ int APS5_VABI sceKernelInitializeDipsw() {
 }
 
 int APS5_VABI sceKernelIsAssistMode() {
-    NotImplemented_nid_no_patch(__func__);
-    return 0;
+    return sceKernelCheckDipsw(2u);
 }
 
 int APS5_VABI sceKernelIsDevelopmentMode() {
-    NotImplemented_nid_no_patch(__func__);
-    return 0;
+    return sceKernelCheckDipsw(0u);
 }
 
 int APS5_VABI sceKernelIsDisableRazor() {
-    NotImplemented_nid_no_patch(__func__);
-    return 0;
+    return sceKernelCheckDipsw(0x18u);
 }
 
 int APS5_VABI sceKernelGetDiableBinaryVersionCheckValue() {
-    NotImplemented_nid_no_patch(__func__);
+    return sceKernelCheckDipsw(0x1eu);
 }
 
 int APS5_VABI sceKernelReadDipswData() {
