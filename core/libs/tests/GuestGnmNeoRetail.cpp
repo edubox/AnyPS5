@@ -73,6 +73,13 @@ int main() {
         sceGnmPaHeartbeat,
         sceGnmRaiseUserExceptionEvent,
         sceGnmValidateGetVersion,
+        sceGnmGetGpuBlockStatus,
+        sceGnmGetGpuInfoStatus,
+        sceGnmGetLastWaitedAddress,
+        sceGnmGetProtectionFaultTimeStamp,
+        sceGnmGetShaderProgramBaseAddress,
+        sceGnmGetShaderStatus,
+        sceGnmInsertThreadTraceMarker,
         libSceGnmDriverForNeoModeUnknown__minus_bNK8kTFf6s_nid_no_patch,
         libSceGnmDriverForNeoModeUnknown_2T1zOhnddFQ_nid_no_patch,
         libSceGnmDriverForNeoModeUnknown_7LTGukH_plus_M1A_nid_no_patch,
@@ -81,6 +88,7 @@ int main() {
         libSceGnmDriverForNeoModeUnknown_QWuQed5Mus4_nid_no_patch,
         libSceGnmDriverForNeoModeUnknown_UGePHM7rmgA_nid_no_patch,
     });
+    if (sceGnmGetNumTcaUnits() != 2) std::abort();
     RequireAll(Failure, {
         libSceGnmDriverForNeoModeUnknown__plus_RaJBCVJZVM_nid_no_patch,
         libSceGnmDriverForNeoModeUnknown_1TRGZJsC5Y4_nid_no_patch,

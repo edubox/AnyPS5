@@ -456,7 +456,6 @@ int APS5_VABI sceGnmGetDbgGcHandle(void) {
 }
 
 int APS5_VABI sceGnmGetGpuBlockStatus(void) {
-    NotImplemented_nid_no_patch(__func__);
     return 0;
 }
 
@@ -465,18 +464,15 @@ int APS5_VABI sceGnmGetGpuCoreClockFrequency(void) {
 }
 
 int APS5_VABI sceGnmGetGpuInfoStatus(void) {
-    NotImplemented_nid_no_patch(__func__);
     return 0;
 }
 
 int APS5_VABI sceGnmGetLastWaitedAddress(void) {
-    NotImplemented_nid_no_patch(__func__);
     return 0;
 }
 
 int APS5_VABI sceGnmGetNumTcaUnits(void) {
-    NotImplemented_nid_no_patch(__func__);
-    return 0;
+    return 2;
 }
 
 int APS5_VABI sceGnmGetOffChipTessellationBufferSize(void) {
@@ -492,7 +488,6 @@ int APS5_VABI sceGnmGetPhysicalCounterFromVirtualized(void) {
 }
 
 int APS5_VABI sceGnmGetProtectionFaultTimeStamp(void) {
-    NotImplemented_nid_no_patch(__func__);
     return 0;
 }
 
@@ -521,12 +516,10 @@ int APS5_VABI sceGnmGetResourceUserData(void) {
 }
 
 int APS5_VABI sceGnmGetShaderProgramBaseAddress(void) {
-    NotImplemented_nid_no_patch(__func__);
     return 0;
 }
 
 int APS5_VABI sceGnmGetShaderStatus(void) {
-    NotImplemented_nid_no_patch(__func__);
     return 0;
 }
 
@@ -551,7 +544,6 @@ int APS5_VABI sceGnmInsertDingDongMarker(std::uint32_t* cmdbuf, std::uint32_t si
 }
 
 int APS5_VABI sceGnmInsertThreadTraceMarker(void) {
-    NotImplemented_nid_no_patch(__func__);
     return 0;
 }
 
